@@ -1,4 +1,4 @@
-"""Application entry point for IRIS Sprint 1."""
+"""Application entry point for IRIS."""
 
 from __future__ import annotations
 
@@ -9,7 +9,9 @@ from PySide6.QtWidgets import QApplication
 from iris.config.loader import load_config
 from iris.core.iris_core import IrisCore
 from iris.dashboard.main_window import MainWindow
-from iris.services.logger import configure_logger, get_logger
+from iris.dashboard.view_model import DashboardViewModel
+from iris.services.logger import configure_logger, get_log_buffer, get_logger
+from iris.services.metrics import MetricsService
 
 
 def main() -> int:
@@ -24,7 +26,12 @@ def main() -> int:
     core.start()
 
     app = QApplication(sys.argv)
-    window = MainWindow(core=core)
+    view_model = DashboardViewModel(
+        core=core,
+        metrics_service=MetricsService(),
+        log_buffer=get_log_buffer(),
+    )
+    window = MainWindow(view_model=view_model)
     window.show()
 
     exit_code = app.exec()
