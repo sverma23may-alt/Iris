@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QProgressBar,
     QPushButton,
     QStatusBar,
     QTabWidget,
@@ -37,6 +38,16 @@ class MainWindow(QMainWindow):
         self._metric_labels: dict[str, QLabel] = {}
         self._status_labels: dict[str, QLabel] = {}
         self._service_labels: dict[str, dict[str, QLabel]] = {}
+        self._youtube_labels: dict[str, QLabel] = {}
+        self._youtube_progress: dict[str, QProgressBar] = {}
+        self._youtube_events: QTextEdit | None = None
+        self._research_labels: dict[str, QLabel] = {}
+        self._research_providers: QTextEdit | None = None
+        self._research_topics: QTextEdit | None = None
+        self._research_events: QTextEdit | None = None
+        self._workflow_panels: dict[str, QTextEdit] = {}
+        self._scheduler_panel: QTextEdit | None = None
+        self._history_panel: QTextEdit | None = None
         self._log_panel: QTextEdit | None = None
 
         self.setWindowTitle("IRIS Synapse Labs")
@@ -55,6 +66,11 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget(container)
         tabs.addTab(self._build_overview_tab(tabs), "Overview")
         tabs.addTab(self._build_services_tab(tabs), "System Services")
+        tabs.addTab(self._build_workflows_tab(tabs), "Workflows")
+        tabs.addTab(self._build_scheduler_tab(tabs), "Scheduler")
+        tabs.addTab(self._build_history_tab(tabs), "Execution History")
+        tabs.addTab(self._build_youtube_tab(tabs), "YouTube Agent")
+        tabs.addTab(self._build_research_tab(tabs), "Research")
 
         layout.addWidget(tabs)
         container.setLayout(layout)
@@ -109,6 +125,207 @@ class MainWindow(QMainWindow):
 
         layout.addStretch(1)
         return tab
+
+    def _build_workflows_tab(self, parent: QWidget) -> QWidget:
+        """Build the workflow operations tab."""
+        tab = QWidget(parent)
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        actions = QHBoxLayout()
+        run_button = QPushButton("Run", tab)
+        pause_button = QPushButton("Pause", tab)
+        resume_button = QPushButton("Resume", tab)
+        retry_button = QPushButton("Retry", tab)
+        cancel_button = QPushButton("Cancel", tab)
+        refresh_button = QPushButton("Refresh", tab)
+        run_button.clicked.connect(self._run_first_workflow)
+        pause_button.clicked.connect(self._pause_latest_execution)
+        resume_button.clicked.connect(self._resume_latest_execution)
+        retry_button.clicked.connect(self._retry_latest_execution)
+        cancel_button.clicked.connect(self._cancel_latest_execution)
+        refresh_button.clicked.connect(self._refresh)
+        for button in (run_button, pause_button, resume_button, retry_button, cancel_button, refresh_button):
+            actions.addWidget(button)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+        self._workflow_panels["summary"] = self._research_panel(tab, "Workflow Details")
+        layout.addWidget(self._labeled_panel(tab, "Workflow Details", self._workflow_panels["summary"]), stretch=1)
+        return tab
+
+    def _build_scheduler_tab(self, parent: QWidget) -> QWidget:
+        """Build the scheduler tab."""
+        tab = QWidget(parent)
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        refresh_button = QPushButton("Refresh", tab)
+        refresh_button.clicked.connect(self._refresh)
+        layout.addWidget(refresh_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        self._scheduler_panel = self._research_panel(tab, "Upcoming Schedules")
+        layout.addWidget(self._labeled_panel(tab, "Upcoming Schedules", self._scheduler_panel), stretch=1)
+        return tab
+
+    def _build_history_tab(self, parent: QWidget) -> QWidget:
+        """Build the workflow execution history tab."""
+        tab = QWidget(parent)
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        self._history_panel = self._research_panel(tab, "Execution History")
+        layout.addWidget(self._labeled_panel(tab, "Execution History", self._history_panel), stretch=1)
+        return tab
+
+    def _build_youtube_tab(self, parent: QWidget) -> QWidget:
+        """Build the YouTube Agent operational tab."""
+        tab = QWidget(parent)
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        for key, title in (
+            ("status", "Current Status"),
+            ("current_task", "Current Task"),
+            ("clip_pilot_process_state", "ClipPilot Process State"),
+            ("last_generated_video", "Last Generated Video"),
+            ("last_upload_url", "Last Upload URL"),
+        ):
+            row = self._youtube_row(tab, title)
+            self._youtube_labels[key] = row.findChild(QLabel, "youtubeValue")
+            layout.addWidget(row)
+
+        layout.addWidget(self._youtube_progress_row(tab, "render_progress", "Render Progress"))
+        layout.addWidget(self._youtube_progress_row(tab, "upload_progress", "Upload Progress"))
+
+        label = QLabel("Recent Events", tab)
+        label.setObjectName("sectionLabel")
+        self._youtube_events = QTextEdit(tab)
+        self._youtube_events.setObjectName("logPanel")
+        self._youtube_events.setReadOnly(True)
+        layout.addWidget(label)
+        layout.addWidget(self._youtube_events, stretch=1)
+        return tab
+
+    def _build_research_tab(self, parent: QWidget) -> QWidget:
+        """Build the Research Agent tab."""
+        tab = QWidget(parent)
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        layout.addLayout(self._build_research_actions(tab))
+
+        for key, title in (
+            ("status", "Current Status"),
+            ("current_scan", "Current Scan"),
+            ("topics_found", "Topics Found"),
+            ("last_scan", "Last Scan"),
+        ):
+            row = self._research_row(tab, title)
+            self._research_labels[key] = row.findChild(QLabel, "researchValue")
+            layout.addWidget(row)
+
+        panes = QGridLayout()
+        panes.setHorizontalSpacing(12)
+        panes.setVerticalSpacing(12)
+        self._research_providers = self._research_panel(tab, "Providers")
+        self._research_topics = self._research_panel(tab, "Top Ranked Topics")
+        self._research_events = self._research_panel(tab, "Recent Events")
+        panes.addWidget(self._labeled_panel(tab, "Providers", self._research_providers), 0, 0)
+        panes.addWidget(self._labeled_panel(tab, "Top Ranked Topics", self._research_topics), 0, 1)
+        panes.addWidget(self._labeled_panel(tab, "Recent Events", self._research_events), 1, 0, 1, 2)
+        layout.addLayout(panes, stretch=1)
+        return tab
+
+    def _build_research_actions(self, parent: QWidget) -> QHBoxLayout:
+        layout = QHBoxLayout()
+        layout.setSpacing(10)
+
+        run_button = QPushButton("Run Scan", parent)
+        refresh_button = QPushButton("Refresh", parent)
+        stop_button = QPushButton("Stop", parent)
+        run_button.clicked.connect(self._request_research_scan)
+        refresh_button.clicked.connect(self._refresh)
+        stop_button.clicked.connect(self._request_research_stop)
+
+        layout.addWidget(run_button)
+        layout.addWidget(refresh_button)
+        layout.addWidget(stop_button)
+        layout.addStretch(1)
+        return layout
+
+    def _research_row(self, parent: QWidget, title: str) -> QWidget:
+        row = QWidget(parent)
+        row.setObjectName("serviceRow")
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(14, 12, 14, 12)
+        row_layout.setSpacing(18)
+
+        name_label = QLabel(title, row)
+        name_label.setObjectName("serviceName")
+        value_label = QLabel("--", row)
+        value_label.setObjectName("researchValue")
+        value_label.setWordWrap(True)
+
+        row_layout.addWidget(name_label, stretch=1)
+        row_layout.addWidget(value_label, stretch=3)
+        return row
+
+    def _research_panel(self, parent: QWidget, name: str) -> QTextEdit:
+        panel = QTextEdit(parent)
+        panel.setObjectName("logPanel")
+        panel.setAccessibleName(name)
+        panel.setReadOnly(True)
+        return panel
+
+    def _labeled_panel(self, parent: QWidget, title: str, panel: QTextEdit) -> QWidget:
+        section = QWidget(parent)
+        layout = QVBoxLayout(section)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        label = QLabel(title, section)
+        label.setObjectName("sectionLabel")
+        layout.addWidget(label)
+        layout.addWidget(panel)
+        return section
+
+    def _youtube_row(self, parent: QWidget, title: str) -> QWidget:
+        row = QWidget(parent)
+        row.setObjectName("serviceRow")
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(14, 12, 14, 12)
+        row_layout.setSpacing(18)
+
+        name_label = QLabel(title, row)
+        name_label.setObjectName("serviceName")
+        value_label = QLabel("--", row)
+        value_label.setObjectName("youtubeValue")
+        value_label.setWordWrap(True)
+
+        row_layout.addWidget(name_label, stretch=1)
+        row_layout.addWidget(value_label, stretch=3)
+        return row
+
+    def _youtube_progress_row(self, parent: QWidget, key: str, title: str) -> QWidget:
+        row = QWidget(parent)
+        row.setObjectName("serviceRow")
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(14, 12, 14, 12)
+        row_layout.setSpacing(18)
+
+        name_label = QLabel(title, row)
+        name_label.setObjectName("serviceName")
+        progress = QProgressBar(row)
+        progress.setRange(0, 100)
+        progress.setValue(0)
+        progress.setTextVisible(True)
+        self._youtube_progress[key] = progress
+
+        row_layout.addWidget(name_label, stretch=1)
+        row_layout.addWidget(progress, stretch=3)
+        return row
 
     def _build_header(self, parent: QWidget) -> QHBoxLayout:
         layout = QHBoxLayout()
@@ -214,6 +431,51 @@ class MainWindow(QMainWindow):
     def _refresh(self) -> None:
         self._render_state(self._view_model.snapshot())
 
+    def _request_research_scan(self) -> None:
+        self._view_model.request_research_scan()
+        self._refresh()
+
+    def _request_research_stop(self) -> None:
+        self._view_model.request_research_stop()
+        self._refresh()
+
+    def _run_first_workflow(self) -> None:
+        state = self._view_model.snapshot()
+        workflows = state.workflows.get("workflows", [])
+        if workflows:
+            self._view_model.run_workflow(str(workflows[0]["workflow_id"]))
+        self._refresh()
+
+    def _pause_latest_execution(self) -> None:
+        execution_id = self._latest_execution_id()
+        if execution_id:
+            self._view_model.pause_workflow(execution_id)
+        self._refresh()
+
+    def _resume_latest_execution(self) -> None:
+        execution_id = self._latest_execution_id()
+        if execution_id:
+            self._view_model.resume_workflow(execution_id)
+        self._refresh()
+
+    def _retry_latest_execution(self) -> None:
+        execution_id = self._latest_execution_id()
+        if execution_id:
+            self._view_model.retry_workflow(execution_id)
+        self._refresh()
+
+    def _cancel_latest_execution(self) -> None:
+        execution_id = self._latest_execution_id()
+        if execution_id:
+            self._view_model.cancel_workflow(execution_id)
+        self._refresh()
+
+    def _latest_execution_id(self) -> str | None:
+        executions = self._view_model.snapshot().workflows.get("executions", [])
+        if not executions:
+            return None
+        return str(executions[-1]["execution_id"])
+
     def _render_state(self, state: DashboardState) -> None:
         metrics = state.metrics
         values = {
@@ -251,6 +513,118 @@ class MainWindow(QMainWindow):
             labels["status"].setText(str(service["status"]))
             labels["healthy"].setText(f"Healthy: {service['healthy']}")
             labels["version"].setText(f"Version: {service['version']}")
+
+        youtube = state.youtube_agent
+        for key, label in self._youtube_labels.items():
+            label.setText(str(youtube.get(key, "--")))
+
+        for key, progress in self._youtube_progress.items():
+            value = int(youtube.get(key, 0) or 0)
+            progress.setValue(max(0, min(100, value)))
+
+        if self._youtube_events is not None:
+            event_lines = [
+                f"{event.get('created_at', '')} | {event.get('name', '')} | {event.get('payload', {})}"
+                for event in youtube.get("recent_events", [])
+                if isinstance(event, dict)
+            ]
+            self._youtube_events.setPlainText("\n".join(event_lines[-100:]))
+
+        research = state.research_agent
+        for key, label in self._research_labels.items():
+            label.setText(str(research.get(key, "--")))
+
+        if self._research_providers is not None:
+            provider_lines = [
+                (
+                    f"{provider.get('name', '')} | enabled={provider.get('enabled', False)} | "
+                    f"healthy={provider.get('healthy', True)} | topics={provider.get('topics_found', 0)}"
+                )
+                for provider in research.get("providers", [])
+                if isinstance(provider, dict)
+            ]
+            self._research_providers.setPlainText("\n".join(provider_lines))
+
+        if self._research_topics is not None:
+            topic_lines = [
+                (
+                    f"{index + 1}. {topic.get('title', '')} | score={topic.get('score', 0)} | "
+                    f"source={topic.get('source', '')}"
+                )
+                for index, topic in enumerate(research.get("top_ranked_topics", []))
+                if isinstance(topic, dict)
+            ]
+            self._research_topics.setPlainText("\n".join(topic_lines))
+
+        if self._research_events is not None:
+            research_event_lines = [
+                f"{event.get('created_at', '')} | {event.get('name', '')} | {event.get('payload', {})}"
+                for event in research.get("recent_events", [])
+                if isinstance(event, dict)
+            ]
+            self._research_events.setPlainText("\n".join(research_event_lines[-100:]))
+
+        self._render_workflow_state(state)
+
+    def _render_workflow_state(self, state: DashboardState) -> None:
+        workflows = state.workflows
+        if "summary" in self._workflow_panels:
+            lines = [
+                (
+                    f"{workflow.get('name', '')} | id={workflow.get('workflow_id', '')} | "
+                    f"steps={len(workflow.get('steps', []))}"
+                )
+                for workflow in workflows.get("workflows", [])
+                if isinstance(workflow, dict)
+            ]
+            metrics = workflows.get("metrics", {})
+            lines.extend(
+                [
+                    "",
+                    f"Running workflows: {len(workflows.get('running', []))}",
+                    f"Queued workflows: {len(workflows.get('queued', []))}",
+                    f"Completed workflows: {len(workflows.get('completed', []))}",
+                    f"Failed workflows: {len(workflows.get('failed', []))}",
+                    f"Success rate: {float(metrics.get('success_rate', 0.0)):.2%}" if isinstance(metrics, dict) else "",
+                ]
+            )
+            self._workflow_panels["summary"].setPlainText("\n".join(lines))
+
+        if self._scheduler_panel is not None:
+            schedule_lines = [
+                (
+                    f"{schedule.get('schedule_type', '')} | workflow={schedule.get('workflow_id', '')} | "
+                    f"next={schedule.get('next_run_at', '--')} | last={schedule.get('last_execution_id', '--')}"
+                )
+                for schedule in state.scheduler.get("upcoming", [])
+                if isinstance(schedule, dict)
+            ]
+            self._scheduler_panel.setPlainText("\n".join(schedule_lines))
+
+        if self._history_panel is not None:
+            history_lines = [
+                (
+                    f"{execution.get('start_time', '')} | {execution.get('workflow_name', '')} | "
+                    f"{execution.get('status', '')} | step={execution.get('current_step', '--')} | "
+                    f"progress={self._progress_percent(execution):.0f}% | retries={execution.get('retry_count', 0)}"
+                )
+                for execution in workflows.get("executions", [])
+                if isinstance(execution, dict)
+            ]
+            self._history_panel.setPlainText("\n".join(history_lines[-200:]))
+
+    def _progress_percent(self, execution: dict[str, object]) -> float:
+        completed = execution.get("completed_steps", [])
+        if not isinstance(completed, list):
+            return 0.0
+        workflow_id = execution.get("workflow_id")
+        for workflow in self._view_model.snapshot().workflows.get("workflows", []):
+            if not isinstance(workflow, dict) or workflow.get("workflow_id") != workflow_id:
+                continue
+            steps = workflow.get("steps", [])
+            if isinstance(steps, list) and steps:
+                return min(100.0, (len(completed) / len(steps)) * 100.0)
+        return 100.0 if execution.get("status") == "Completed" else 0.0
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(

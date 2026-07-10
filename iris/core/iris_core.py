@@ -19,7 +19,11 @@ from iris.services.secrets_manager import SecretsManager
 from iris.services.service_registry import ServiceRegistry
 from iris.services.storage_manager import StorageManager
 from iris.services.task_queue import TaskQueue
+from iris.plugins.context import PluginContext
 from iris.utils.status import ServiceStatus
+from iris.workflows.decision_engine import DecisionEngine
+from iris.workflows.engine import WorkflowEngine
+from iris.workflows.scheduler import SchedulerService
 
 
 @dataclass(frozen=True)
@@ -68,8 +72,36 @@ class IrisCore:
         self._service_registry.register("process_manager", ProcessManager())
         self._service_registry.register("notifications", NotificationManager())
 
+        decision_engine = DecisionEngine()
+        workflow_engine = WorkflowEngine(
+            task_queue=self.task_queue,
+            event_bus=self.event_bus,
+            storage=self._service_registry.get("storage", StorageManager),
+            decision_engine=decision_engine,
+            configuration=self._service_registry.get("configuration", ConfigurationService),
+        )
+        scheduler = SchedulerService(
+            workflow_engine=workflow_engine,
+            storage=self._service_registry.get("storage", StorageManager),
+            event_bus=self.event_bus,
+        )
+        self._service_registry.register("decision_engine", decision_engine)
+        self._service_registry.register("workflow_engine", workflow_engine)
+        self._service_registry.register("scheduler", scheduler)
+
         background_worker = BackgroundWorker(self.task_queue, self.event_bus)
-        plugin_loader = PluginLoader(event_bus=self.event_bus)
+        plugin_context = PluginContext(
+            event_bus=self.event_bus,
+            task_queue=self.task_queue,
+            process_manager=self._service_registry.get("process_manager", ProcessManager),
+            configuration=self._service_registry.get("configuration", ConfigurationService),
+            service_registry=self._service_registry,
+            logger=get_logger("iris.plugins"),
+            workflow_engine=workflow_engine,
+            scheduler=scheduler,
+            decision_engine=decision_engine,
+        )
+        plugin_loader = PluginLoader(event_bus=self.event_bus, context=plugin_context)
         self._service_registry.register("background_worker", background_worker)
         self._service_registry.register("plugin_loader", plugin_loader)
         self._status = ServiceStatus.OFFLINE
@@ -163,6 +195,9 @@ class IrisCore:
                         "secrets",
                         "process_manager",
                         "notifications",
+                        "workflow_engine",
+                        "scheduler",
+                        "decision_engine",
                         "Service Registry",
                     ]
                 )
@@ -191,6 +226,7 @@ class IrisCore:
             "notifications",
         ):
             self._service_registry.get(name).start()
+        self._service_registry.get("workflow_engine", WorkflowEngine).load_workflows()
 
     def _stop_system_services(self) -> None:
         """Stop registry-managed system services."""

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 from iris.services.base import ManagedService
 from iris.services.logger import get_logger
@@ -39,3 +41,27 @@ class StorageManager(ManagedService):
     def paths(self) -> dict[str, Path]:
         """Return all managed paths."""
         return {name: path.resolve() for name, path in self._paths.items()}
+
+    def namespace_path(self, namespace: str) -> Path:
+        """Return a managed namespace path under the storage root."""
+        path = (self._root_path / namespace).resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def save_json(self, namespace: str, filename: str, data: dict[str, Any]) -> Path:
+        """Persist JSON data in a managed namespace."""
+        path = self.namespace_path(namespace) / filename
+        path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        return path
+
+    def load_json(
+        self,
+        namespace: str,
+        filename: str,
+        default: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Load JSON data from a managed namespace."""
+        path = self.namespace_path(namespace) / filename
+        if not path.exists():
+            return dict(default or {})
+        return json.loads(path.read_text(encoding="utf-8"))
