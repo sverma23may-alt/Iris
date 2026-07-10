@@ -18,6 +18,7 @@ class DashboardState:
     queue_size: int
     running_tasks: int
     completed_tasks: int
+    services: list[dict[str, object]]
     metrics: SystemMetrics
     logs: list[str]
 
@@ -44,6 +45,7 @@ class DashboardViewModel:
             queue_size=status.queue_size,
             running_tasks=status.running_tasks,
             completed_tasks=status.completed_tasks,
+            services=status.services,
             metrics=self._metrics_service.snapshot(),
             logs=self._log_buffer.lines(),
         )

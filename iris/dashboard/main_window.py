@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QStatusBar,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -21,11 +22,21 @@ from iris.dashboard.view_model import DashboardState, DashboardViewModel
 class MainWindow(QMainWindow):
     """IRIS dashboard shell backed by a presentation model."""
 
+    SERVICE_NAMES = (
+        "Configuration",
+        "Storage",
+        "Secrets",
+        "Process Manager",
+        "Notifications",
+        "Service Registry",
+    )
+
     def __init__(self, view_model: DashboardViewModel) -> None:
         super().__init__()
         self._view_model = view_model
         self._metric_labels: dict[str, QLabel] = {}
         self._status_labels: dict[str, QLabel] = {}
+        self._service_labels: dict[str, dict[str, QLabel]] = {}
         self._log_panel: QTextEdit | None = None
 
         self.setWindowTitle("IRIS Synapse Labs")
@@ -41,20 +52,63 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(28, 24, 28, 20)
         layout.setSpacing(18)
 
-        header = self._build_header(container)
-        metrics = self._build_metrics(container)
-        actions = self._build_actions(container)
-        logs = self._build_logs(container)
+        tabs = QTabWidget(container)
+        tabs.addTab(self._build_overview_tab(tabs), "Overview")
+        tabs.addTab(self._build_services_tab(tabs), "System Services")
 
-        layout.addLayout(header)
-        layout.addLayout(metrics)
-        layout.addLayout(actions)
-        layout.addWidget(logs, stretch=1)
-
+        layout.addWidget(tabs)
         container.setLayout(layout)
         self.setCentralWidget(container)
         self._build_status_bar()
         self._apply_styles()
+
+    def _build_overview_tab(self, parent: QWidget) -> QWidget:
+        """Build the operational overview tab."""
+        tab = QWidget(parent)
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(18)
+
+        layout.addLayout(self._build_header(tab))
+        layout.addLayout(self._build_metrics(tab))
+        layout.addLayout(self._build_actions(tab))
+        layout.addWidget(self._build_logs(tab), stretch=1)
+        return tab
+
+    def _build_services_tab(self, parent: QWidget) -> QWidget:
+        """Build the system services tab."""
+        tab = QWidget(parent)
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        for name in self.SERVICE_NAMES:
+            row = QWidget(tab)
+            row.setObjectName("serviceRow")
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(14, 12, 14, 12)
+            row_layout.setSpacing(18)
+
+            name_label = QLabel(name, row)
+            name_label.setObjectName("serviceName")
+            status_label = QLabel("Stopped", row)
+            healthy_label = QLabel("Healthy: --", row)
+            version_label = QLabel("Version: --", row)
+
+            self._service_labels[name] = {
+                "status": status_label,
+                "healthy": healthy_label,
+                "version": version_label,
+            }
+
+            row_layout.addWidget(name_label, stretch=2)
+            row_layout.addWidget(status_label, stretch=1)
+            row_layout.addWidget(healthy_label, stretch=1)
+            row_layout.addWidget(version_label, stretch=1)
+            layout.addWidget(row)
+
+        layout.addStretch(1)
+        return tab
 
     def _build_header(self, parent: QWidget) -> QHBoxLayout:
         layout = QHBoxLayout()
@@ -93,8 +147,7 @@ class MainWindow(QMainWindow):
         ]
 
         for index, (key, title) in enumerate(cards):
-            card = self._metric_card(parent, key, title)
-            layout.addWidget(card, index // 4, index % 4)
+            layout.addWidget(self._metric_card(parent, key, title), index // 4, index % 4)
 
         return layout
 
@@ -120,13 +173,9 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout()
         layout.setSpacing(10)
 
-        start_button = QPushButton("Start", parent)
-        stop_button = QPushButton("Stop", parent)
-        settings_button = QPushButton("Settings", parent)
-
-        layout.addWidget(start_button)
-        layout.addWidget(stop_button)
-        layout.addWidget(settings_button)
+        layout.addWidget(QPushButton("Start", parent))
+        layout.addWidget(QPushButton("Stop", parent))
+        layout.addWidget(QPushButton("Settings", parent))
         layout.addStretch(1)
         return layout
 
@@ -163,8 +212,7 @@ class MainWindow(QMainWindow):
         timer.start(1000)
 
     def _refresh(self) -> None:
-        state = self._view_model.snapshot()
-        self._render_state(state)
+        self._render_state(self._view_model.snapshot())
 
     def _render_state(self, state: DashboardState) -> None:
         metrics = state.metrics
@@ -193,6 +241,16 @@ class MainWindow(QMainWindow):
             self._log_panel.verticalScrollBar().setValue(
                 self._log_panel.verticalScrollBar().maximum()
             )
+
+        for service in state.services:
+            name = str(service["name"])
+            labels = self._service_labels.get(name)
+            if labels is None:
+                continue
+
+            labels["status"].setText(str(service["status"]))
+            labels["healthy"].setText(f"Healthy: {service['healthy']}")
+            labels["version"].setText(f"Version: {service['version']}")
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(
@@ -232,7 +290,7 @@ class MainWindow(QMainWindow):
                 font-weight: 600;
             }
 
-            QWidget#metricCard {
+            QWidget#metricCard, QWidget#serviceRow {
                 background-color: #ffffff;
                 border: 1px solid #d8dee8;
                 border-radius: 8px;
@@ -249,6 +307,11 @@ class MainWindow(QMainWindow):
                 font-weight: 700;
             }
 
+            QLabel#serviceName {
+                color: #111827;
+                font-weight: 700;
+            }
+
             QPushButton {
                 min-width: 110px;
                 min-height: 34px;
@@ -261,6 +324,28 @@ class MainWindow(QMainWindow):
 
             QPushButton:hover {
                 background-color: #edf2f7;
+            }
+
+            QTabWidget::pane {
+                border: 0;
+            }
+
+            QTabBar::tab {
+                min-width: 150px;
+                min-height: 32px;
+                padding: 6px 12px;
+                margin-right: 6px;
+                border: 1px solid #cbd5e1;
+                border-radius: 6px;
+                background-color: #ffffff;
+                color: #334155;
+            }
+
+            QTabBar::tab:selected {
+                background-color: #e8f6ed;
+                border-color: #b7d7c0;
+                color: #14532d;
+                font-weight: 600;
             }
 
             QTextEdit#logPanel {
