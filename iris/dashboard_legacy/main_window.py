@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from iris.dashboard.view_model import DashboardState, DashboardViewModel
+from iris.dashboard_legacy.view_model import DashboardState, DashboardViewModel
 
 
 class MainWindow(QMainWindow):

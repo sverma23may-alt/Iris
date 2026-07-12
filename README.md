@@ -1,6 +1,6 @@
 # IRIS
 
-IRIS is a production-oriented AI orchestration platform built incrementally with Clean Architecture principles. Sprint 5 adds workflow automation, scheduling, persistence, and a generic decision engine while preserving all Sprint 1 through Sprint 4 APIs.
+IRIS is a production-oriented AI orchestration platform built incrementally with Clean Architecture principles. Version 1.0 introduces IRIS Vision, the Synapse Labs AI Operating System interface layered on top of the existing Sprint 5 backend.
 
 ## Run
 
@@ -12,7 +12,7 @@ If `python` is not on PATH, activate or repair the project virtual environment f
 
 ## Architecture
 
-The application is organized around a small core, service layer, agent layer, and PySide6 dashboard. `IrisCore` remains the composition root and retrieves infrastructure through `ServiceRegistry`. The dashboard uses a view model so UI code displays state without owning business or infrastructure logic.
+The application is organized around a small core, service layer, agent layer, and PySide6 frontend. `IrisCore` remains the composition root and retrieves infrastructure through `ServiceRegistry`. IRIS Vision uses a view model so UI code displays state without owning business or infrastructure logic.
 
 Production plugins receive dependencies through `PluginContext`, a stable boundary that exposes `EventBus`, `TaskQueue`, `ProcessManager`, `ConfigurationService`, `ServiceRegistry`, and a contextual logger. Legacy plugins that inherit from `BaseAgent` and use no-argument constructors continue to load unchanged.
 
@@ -176,6 +176,36 @@ Sprint 3 also adds a `YouTube Agent` page with current status, current task, Cli
 Sprint 4 adds a `Research` page with providers, current scan, topics found, ranked topics, provider status, last scan, and scan controls.
 
 Sprint 5 adds `Workflows`, `Scheduler`, and `Execution History` pages with workflow state, progress, upcoming schedules, last execution, metrics, and run/pause/resume/retry/cancel controls.
+
+## IRIS Vision
+
+IRIS Vision keeps the backend architecture intact and replaces only the PySide6 presentation layer. The previous dashboard is archived in `iris/dashboard_legacy/`.
+
+Visual system:
+
+- Permanent animated IRIS Core at the center of the operating system
+- Dark glassmorphism theme with blue/cyan idle states and dark red focus mode
+- Sidebar built with native Qt icon assets, never text icon names
+- Smooth fade and slide transitions
+- Live PyQtGraph chart cards
+- Animated neural background, workflow graph, provider orbit cards, and voice cloud
+- Slide-out notification center
+- `Ctrl+Shift+F` focus mode, leaving Mission Control, Workflow, Voice, and Console-oriented views visible
+
+Pages:
+
+- Mission Control
+- Research
+- Studio
+- AI Providers
+- Workflows
+- Scheduler
+- Analytics
+- Telegram
+- Voice
+- Settings
+
+Mission Control shows CPU, GPU, RAM, VRAM, disk, network, agent, queue, notification, workflow, and provider status around the IRIS Core. Workflow controls call the existing `WorkflowEngine`; Research scan controls call the existing Research Agent; Studio, Scheduler, Analytics, Telegram, Voice, Notifications, and Settings render live state from the existing services and logs.
 
 Each row shows status, health, and version.
 
