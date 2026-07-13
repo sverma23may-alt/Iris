@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from iris.ai_router.configuration import AIRouterConfiguration
+from iris.ai_router.router import AIRouter
 from iris.agents.base_agent import BaseAgent
 from iris.agents.manager import AgentManager
 from iris.services.async_runtime import AsyncRuntime
@@ -71,6 +73,12 @@ class IrisCore:
         self._service_registry.register("secrets", SecretsManager())
         self._service_registry.register("process_manager", ProcessManager())
         self._service_registry.register("notifications", NotificationManager())
+        ai_router = AIRouter(
+            AIRouterConfiguration.from_configuration_service(
+                self._service_registry.get("configuration", ConfigurationService)
+            )
+        )
+        self._service_registry.register("ai_router", ai_router)
 
         decision_engine = DecisionEngine()
         workflow_engine = WorkflowEngine(
@@ -195,6 +203,7 @@ class IrisCore:
                         "secrets",
                         "process_manager",
                         "notifications",
+                        "ai_router",
                         "workflow_engine",
                         "scheduler",
                         "decision_engine",
@@ -224,6 +233,7 @@ class IrisCore:
             "secrets",
             "process_manager",
             "notifications",
+            "ai_router",
         ):
             self._service_registry.get(name).start()
         self._service_registry.get("workflow_engine", WorkflowEngine).load_workflows()
@@ -232,6 +242,7 @@ class IrisCore:
         """Stop registry-managed system services."""
         for name in (
             "notifications",
+            "ai_router",
             "process_manager",
             "secrets",
             "storage",

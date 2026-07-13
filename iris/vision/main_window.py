@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from collections import deque
 from getpass import getuser
 from html import escape
@@ -13,11 +14,13 @@ try:  # pragma: no cover - optional UI dependency
 except ImportError:  # pragma: no cover
     pg = None
 
-from PySide6.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, QTimer, Qt
-from PySide6.QtGui import QAction, QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, QSize, QTimer, Qt
+from PySide6.QtGui import QAction, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
-    QApplication,
+    QCheckBox,
+    QComboBox,
     QFrame,
+    QGraphicsBlurEffect,
     QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect,
     QGridLayout,
@@ -27,6 +30,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QScrollArea,
+    QSlider,
     QSizePolicy,
     QStackedWidget,
     QStyle,
@@ -65,20 +69,32 @@ class MainWindow(QMainWindow):
         self._charts: dict[str, LiveChart] = {}
         self._panels: dict[str, QTextEdit] = {}
         self._providers: list[OrbitCard] = []
+        self._focus_widgets: list[QWidget] = []
         self._sidebar: QFrame | None = None
+        self._stage: QFrame | None = None
+        self._top_bar: QFrame | None = None
         self._notification_panel: QFrame | None = None
+        self._notification_badge: QLabel | None = None
         self._notification_text: QTextEdit | None = None
         self._notification_search: QLineEdit | None = None
         self._notification_filter: QLineEdit | None = None
         self._workflow_graph: WorkflowGraph | None = None
         self._background: NeuralBackground | None = None
         self._core: IrisCoreWidget | None = None
+        self._voice_core: IrisCoreWidget | None = None
+        self._voice_waveform: "VoiceWaveform | None" = None
+        self._voice_input: QLineEdit | None = None
+        self._voice_history: QTextEdit | None = None
+        self._voice_provider: QComboBox | None = None
+        self._voice_mic_status: QLabel | None = None
+        self._active_task: QLabel | None = None
         self._stack: QStackedWidget | None = None
         self._last_state: DashboardState | None = None
         self._notifications_open = False
         self._sidebar_expanded = True
         self._focus_mode = False
         self._tick = 0
+        self._last_completed_count = 0
 
         self.setWindowTitle("Synapse Labs - IRIS Vision")
         self.setMinimumSize(1320, 820)
@@ -98,14 +114,15 @@ class MainWindow(QMainWindow):
         self._sidebar = self._build_sidebar(root)
         root_layout.addWidget(self._sidebar)
 
-        stage = QFrame(root)
-        stage.setObjectName("stage")
-        stage_layout = QVBoxLayout(stage)
+        self._stage = QFrame(root)
+        self._stage.setObjectName("stage")
+        stage_layout = QVBoxLayout(self._stage)
         stage_layout.setContentsMargins(18, 14, 18, 14)
         stage_layout.setSpacing(12)
-        stage_layout.addWidget(self._build_top_bar(stage))
+        self._top_bar = self._build_top_bar(self._stage)
+        stage_layout.addWidget(self._top_bar)
 
-        canvas = QFrame(stage)
+        canvas = QFrame(self._stage)
         canvas.setObjectName("canvas")
         canvas_layout = QGridLayout(canvas)
         canvas_layout.setContentsMargins(0, 0, 0, 0)
@@ -128,7 +145,7 @@ class MainWindow(QMainWindow):
         canvas_layout.addWidget(overlay, 0, 0)
         stage_layout.addWidget(canvas, stretch=1)
 
-        root_layout.addWidget(stage, stretch=1)
+        root_layout.addWidget(self._stage, stretch=1)
         self._notification_panel = self._build_notification_panel(root)
         self._notification_panel.setMaximumWidth(0)
         root_layout.addWidget(self._notification_panel)
@@ -138,10 +155,10 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self, parent: QWidget) -> QFrame:
         sidebar = QFrame(parent)
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(228)
+        sidebar.setFixedWidth(264)
         layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(12, 16, 12, 16)
-        layout.setSpacing(8)
+        layout.setContentsMargins(16, 18, 16, 18)
+        layout.setSpacing(10)
 
         brand = QLabel("Synapse Labs\nIRIS Vision", sidebar)
         brand.setObjectName("brand")
@@ -160,6 +177,7 @@ class MainWindow(QMainWindow):
             button.setText(title)
             button.setToolTip(title)
             button.setIcon(self.style().standardIcon(icon_id))
+            button.setIconSize(QSize(22, 22))
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
             button.clicked.connect(lambda _checked=False, page_key=key: self._select_page(page_key))
             self._page_buttons[key] = button
@@ -192,6 +210,9 @@ class MainWindow(QMainWindow):
         notify.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation))
         notify.clicked.connect(self._toggle_notifications)
         layout.addWidget(notify)
+        self._notification_badge = QLabel("0", top)
+        self._notification_badge.setObjectName("unreadBadge")
+        layout.addWidget(self._notification_badge)
         return top
 
     def _build_page(self, key: str) -> QWidget:
@@ -237,6 +258,7 @@ class MainWindow(QMainWindow):
         ):
             card = MetricTile(title)
             self._metric_labels[key] = card.value
+            self._focus_widgets.append(card)
             left.addWidget(card, index // 2, index % 2)
 
         center = QWidget(page)
@@ -245,6 +267,10 @@ class MainWindow(QMainWindow):
         center_layout.setSpacing(12)
         self._core = IrisCoreWidget(center)
         center_layout.addWidget(self._core, stretch=3)
+        self._active_task = QLabel("Current active task: standby", center)
+        self._active_task.setObjectName("activeTask")
+        self._active_task.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        center_layout.addWidget(self._active_task)
         self._panels["mission_status"] = self._text_panel("Mission Stream")
         center_layout.addWidget(self._panels["mission_status"], stretch=2)
 
@@ -252,6 +278,8 @@ class MainWindow(QMainWindow):
         for key, title in (("workflow_status", "Workflow Status"), ("provider_status", "Provider Status")):
             panel = self._text_panel(title)
             self._panels[key] = panel
+            if key == "provider_status":
+                self._focus_widgets.append(panel)
             right.addWidget(panel)
 
         layout.addLayout(left, 0, 0)
@@ -282,12 +310,17 @@ class MainWindow(QMainWindow):
         orbit.setObjectName("orbitPanel")
         orbit_layout = QGridLayout(orbit)
         orbit_layout.setContentsMargins(18, 18, 18, 18)
-        providers = ("Gemini", "Groq", "OpenRouter", "GLM", "Ollama", "Cerebras", "Future Providers")
+        refresh = QPushButton("Refresh", orbit)
+        refresh.clicked.connect(self._refresh)
+        orbit_layout.addWidget(refresh, 0, 0, 1, 3)
+        providers = ("Mock", "Provider 2", "Provider 3", "Provider 4", "Provider 5", "Provider 6", "Future Providers")
         for index, provider in enumerate(providers):
             card = OrbitCard(provider)
             self._providers.append(card)
-            orbit_layout.addWidget(card, index // 3, index % 3)
+            self._focus_widgets.append(card)
+            orbit_layout.addWidget(card, index // 3 + 1, index % 3)
         layout.addWidget(orbit, 0, 0)
+        self._focus_widgets.append(orbit)
         self._panels["router_status"] = self._text_panel("Provider Telemetry")
         layout.addWidget(self._panels["router_status"], 0, 1)
         layout.setColumnStretch(0, 3)
@@ -330,6 +363,7 @@ class MainWindow(QMainWindow):
         ):
             tile = MetricTile(title)
             self._metric_labels[key] = tile.value
+            self._focus_widgets.append(tile)
             grid.addWidget(tile, index // 2, index % 2)
         layout.addLayout(grid)
         self._panels["studio_history"] = self._text_panel("Studio History")
@@ -343,6 +377,7 @@ class MainWindow(QMainWindow):
         for index, name in enumerate(("CPU", "GPU", "RAM", "VRAM", "Disk", "Queue", "Network", "Requests")):
             chart = LiveChart(name)
             self._charts[f"analytics_{name.lower()}"] = chart
+            self._focus_widgets.append(chart)
             grid.addWidget(chart, index // 2, index % 2)
         layout.addLayout(grid)
         return page
@@ -353,13 +388,81 @@ class MainWindow(QMainWindow):
     def _build_voice_page(self) -> QWidget:
         page = QWidget()
         page.setObjectName("visionPage")
-        layout = QVBoxLayout(page)
+        layout = QGridLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        voice_core = IrisCoreWidget(page)
-        voice_core.set_state("speaking")
-        layout.addWidget(voice_core, stretch=3)
-        self._panels["voice_console"] = self._text_panel("Voice Console")
-        layout.addWidget(self._panels["voice_console"], stretch=2)
+        layout.setSpacing(14)
+
+        left = QFrame(page)
+        left.setObjectName("glass")
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(14, 14, 14, 14)
+        left_layout.setSpacing(10)
+        title = QLabel("Voice Session", left)
+        title.setObjectName("sectionTitle")
+        self._voice_history = self._text_panel("Conversation History")
+        self._voice_history.setMinimumHeight(300)
+        input_row = QHBoxLayout()
+        self._voice_input = QLineEdit(left)
+        self._voice_input.setPlaceholderText("Message IRIS")
+        self._voice_input.returnPressed.connect(self._send_voice_message)
+        send = QPushButton("Send", left)
+        send.clicked.connect(self._send_voice_message)
+        voice = QPushButton("Voice", left)
+        voice.clicked.connect(self._toggle_voice_listening)
+        input_row.addWidget(self._voice_input, stretch=1)
+        input_row.addWidget(send)
+        input_row.addWidget(voice)
+        left_layout.addWidget(title)
+        left_layout.addWidget(self._voice_history, stretch=1)
+        left_layout.addLayout(input_row)
+
+        center = QFrame(page)
+        center.setObjectName("glass")
+        center_layout = QVBoxLayout(center)
+        center_layout.setContentsMargins(12, 12, 12, 12)
+        self._voice_core = IrisCoreWidget(center)
+        self._voice_core.set_state("listening")
+        self._voice_waveform = VoiceWaveform(center)
+        center_layout.addWidget(self._voice_core, stretch=3)
+        center_layout.addWidget(self._voice_waveform)
+
+        right = QFrame(page)
+        right.setObjectName("glass")
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(14, 14, 14, 14)
+        right_layout.setSpacing(10)
+        settings = QLabel("Voice Settings", right)
+        settings.setObjectName("sectionTitle")
+        self._voice_mic_status = QLabel("Microphone: standby", right)
+        self._voice_mic_status.setObjectName("cardLabel")
+        provider_label = QLabel("Current provider", right)
+        provider_label.setObjectName("cardLabel")
+        self._voice_provider = QComboBox(right)
+        self._voice_provider.addItems(("Local Bridge", "OpenAI Realtime", "System TTS", "Future Provider"))
+        vad = QCheckBox("Voice activity detection", right)
+        vad.setChecked(True)
+        vad.setObjectName("voiceCheck")
+        sensitivity_label = QLabel("Input sensitivity", right)
+        sensitivity_label.setObjectName("cardLabel")
+        sensitivity = QSlider(Qt.Orientation.Horizontal, right)
+        sensitivity.setRange(0, 100)
+        sensitivity.setValue(62)
+        self._panels["voice_console"] = self._text_panel("Conversation Log")
+        right_layout.addWidget(settings)
+        right_layout.addWidget(self._voice_mic_status)
+        right_layout.addWidget(provider_label)
+        right_layout.addWidget(self._voice_provider)
+        right_layout.addWidget(vad)
+        right_layout.addWidget(sensitivity_label)
+        right_layout.addWidget(sensitivity)
+        right_layout.addWidget(self._panels["voice_console"], stretch=1)
+
+        layout.addWidget(left, 0, 0)
+        layout.addWidget(center, 0, 1)
+        layout.addWidget(right, 0, 2)
+        layout.setColumnStretch(0, 3)
+        layout.setColumnStretch(1, 3)
+        layout.setColumnStretch(2, 2)
         return page
 
     def _build_settings_page(self) -> QWidget:
@@ -385,6 +488,7 @@ class MainWindow(QMainWindow):
         self._notification_filter = QLineEdit(panel)
         self._notification_filter.setPlaceholderText("Filter source or state")
         self._notification_text = self._text_panel("Notifications")
+        self._notification_text.setObjectName("timelinePanel")
         self._notification_search.textChanged.connect(self._render_cached_notifications)
         self._notification_filter.textChanged.connect(self._render_cached_notifications)
         layout.addWidget(title)
@@ -464,6 +568,10 @@ class MainWindow(QMainWindow):
             self._background.set_phase(phase, self._focus_mode)
         if self._core is not None:
             self._core.set_phase(phase)
+        if self._voice_core is not None:
+            self._voice_core.set_phase(phase)
+        if self._voice_waveform is not None:
+            self._voice_waveform.set_phase(phase, self._voice_core.state if self._voice_core is not None else "idle")
         if self._workflow_graph is not None:
             self._workflow_graph.set_phase(phase)
         for chart in self._charts.values():
@@ -507,8 +615,12 @@ class MainWindow(QMainWindow):
         core_state = "error" if failed else "workflow" if running else "thinking" if queue_size else "idle"
         if self._core is not None:
             self._core.set_state(core_state)
-            if completed:
-                self._core.set_speech("Workflow completed.")
+            if len(completed) > self._last_completed_count:
+                self._core.set_speech("Workflow completed.\nIRIS systems are synchronized.")
+        self._last_completed_count = len(completed)
+        if self._active_task is not None:
+            task = "workflow running" if running else "queue pending" if queue_size else "standby"
+            self._active_task.setText(f"Current active task: {task}")
 
         chart_values = {
             "analytics_cpu": metrics.cpu_percent,
@@ -590,15 +702,35 @@ class MainWindow(QMainWindow):
         self._set_panel("studio_history", lines)
 
     def _render_router(self, state: DashboardState) -> None:
-        names = ("Gemini", "Groq", "OpenRouter", "GLM", "Ollama", "Cerebras", "Future Providers")
-        provider_status = state.research_agent.get("provider_status", [])
-        lines = []
+        provider_status = [
+            item for item in state.ai_router.get("provider_status", []) if isinstance(item, dict)
+        ]
+        lines = [
+            f"Routing mode: {state.ai_router.get('routing_mode', '--')}",
+            f"Current provider: {state.ai_router.get('current_provider', '--')}",
+            "",
+            "Registered Providers",
+        ]
         for index, card in enumerate(self._providers):
-            latency = 40 + ((self._tick + index * 13) % 160)
-            status = "Online" if index < max(1, len(provider_status)) else "Standby"
-            requests = state.completed_tasks + index
-            card.set_rows(status, f"{latency} ms", str(requests), active=index == 0)
-            lines.append(f"{names[index]} | {status} | {latency} ms | {requests} requests")
+            provider = provider_status[index] if index < len(provider_status) else None
+            if provider is None:
+                card.set_rows("Future", "--", "0", active=False)
+                continue
+
+            name = str(provider.get("name", "--"))
+            status = str(provider.get("status", "--"))
+            latency = provider.get("latency_ms")
+            latency_text = "--" if latency is None else f"{float(latency):.1f} ms"
+            health = "Healthy" if provider.get("available") else "Unavailable"
+            current = name == state.ai_router.get("current_provider")
+            card.title.setText(name.title())
+            card.set_rows(status, latency_text, health, active=current)
+            lines.append(
+                f"{name} | {status} | Health {health} | Latency {latency_text} | "
+                f"Last success {provider.get('last_successful_request') or '--'}"
+            )
+        if not provider_status:
+            lines.append("No providers registered.")
         self._set_panel("router_status", lines)
         self._set_panel("provider_status", lines)
 
@@ -623,7 +755,16 @@ class MainWindow(QMainWindow):
             cards.append(self._html_card(name, f"{health} | {status} | v{service.get('version', '--')}"))
         self._set_panel_html("settings", self._html_doc("System Services", "".join(cards)))
         self._set_panel("telegram", state.logs[-80:] or ["No Telegram events in the current log stream."])
-        self._set_panel("voice_console", ["Voice is represented by the IRIS Core.", "Listening and speaking states are rendered through the central Core."])
+        provider = self._voice_provider.currentText() if self._voice_provider is not None else "Local Bridge"
+        self._set_panel(
+            "voice_console",
+            [
+                f"Provider: {provider}",
+                "STT integration point: voice input bridge",
+                "TTS integration point: IRIS Core speech cloud",
+                "Conversation events are local until a voice backend is registered.",
+            ],
+        )
         self._set_panel("mission_status", state.logs[-80:] or ["IRIS Core online."])
 
     def _render_cached_notifications(self) -> None:
@@ -643,7 +784,17 @@ class MainWindow(QMainWindow):
             if filter_value and filter_value not in normalized:
                 continue
             lines.append(line)
-        self._notification_text.setPlainText("\n".join(lines[-140:]))
+        unread = len(lines)
+        if self._notification_badge is not None:
+            self._notification_badge.setText(str(min(99, unread)))
+            self._notification_badge.setProperty("attention", unread > 0)
+            self._notification_badge.style().unpolish(self._notification_badge)
+            self._notification_badge.style().polish(self._notification_badge)
+        timeline = []
+        for index, line in enumerate(lines[-140:]):
+            marker = "NEW" if index >= max(0, len(lines[-140:]) - 5) else "LOG"
+            timeline.append(f"{marker}  {line}")
+        self._notification_text.setPlainText("\n".join(timeline))
 
     def _set_panel(self, key: str, lines: list[str]) -> None:
         panel = self._panels.get(key)
@@ -693,7 +844,7 @@ class MainWindow(QMainWindow):
         if page is not None:
             self._stack.setCurrentWidget(page)
         for page_key, button in self._page_buttons.items():
-            visible = not self._focus_mode or page_key in {"mission", "workflow", "voice"}
+            visible = not self._focus_mode or page_key in {"mission", "workflow", "voice", "settings"}
             button.setVisible(visible)
             button.setProperty("active", page_key == key)
             button.style().unpolish(button)
@@ -718,8 +869,14 @@ class MainWindow(QMainWindow):
         if self._sidebar is None:
             return
         self._sidebar_expanded = not self._sidebar_expanded
-        width = 228 if self._sidebar_expanded else 76
-        self._sidebar.setFixedWidth(width)
+        width = 264 if self._sidebar_expanded else 82
+        for prop in (b"minimumWidth", b"maximumWidth"):
+            animation = QPropertyAnimation(self._sidebar, prop, self)
+            animation.setDuration(240)
+            animation.setStartValue(self._sidebar.width())
+            animation.setEndValue(width)
+            animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+            animation.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
         for button in self._page_buttons.values():
             button.setToolButtonStyle(
                 Qt.ToolButtonStyle.ToolButtonTextBesideIcon if self._sidebar_expanded else Qt.ToolButtonStyle.ToolButtonIconOnly
@@ -729,26 +886,92 @@ class MainWindow(QMainWindow):
         if self._notification_panel is None:
             return
         self._notifications_open = not self._notifications_open
+        if self._focus_mode and self._notifications_open:
+            self._notifications_open = False
+            return
         animation = QPropertyAnimation(self._notification_panel, b"maximumWidth", self)
         animation.setDuration(260)
         animation.setStartValue(self._notification_panel.maximumWidth())
         animation.setEndValue(390 if self._notifications_open else 0)
         animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         animation.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+        if self._stage is not None:
+            if self._notifications_open:
+                blur = QGraphicsBlurEffect(self._stage)
+                blur.setBlurRadius(1.6)
+                self._stage.setGraphicsEffect(blur)
+            else:
+                self._stage.setGraphicsEffect(None)
 
     def _toggle_focus_mode(self) -> None:
         self._focus_mode = not self._focus_mode
+        if self._focus_mode and self._notifications_open:
+            self._notifications_open = False
+            if self._notification_panel is not None:
+                self._notification_panel.setMaximumWidth(0)
+            if self._stage is not None:
+                self._stage.setGraphicsEffect(None)
         self.setProperty("focusMode", self._focus_mode)
         self.style().unpolish(self)
         self.style().polish(self)
+        for widget in self._focus_widgets:
+            self._fade_widget_visible(widget, not self._focus_mode)
+        if self._top_bar is not None:
+            for label in self._status_labels.values():
+                label.setVisible(not self._focus_mode)
         for key, button in self._page_buttons.items():
-            button.setVisible(not self._focus_mode or key in {"mission", "workflow", "voice"})
+            button.setVisible(not self._focus_mode or key in {"mission", "workflow", "voice", "settings"})
         if self._stack is not None and self._focus_mode and self._stack.currentWidget() not in {
             self._pages["mission"],
             self._pages["workflow"],
             self._pages["voice"],
+            self._pages["settings"],
         }:
             self._select_page("mission")
+
+    def _fade_widget_visible(self, widget: QWidget, visible: bool) -> None:
+        if visible:
+            widget.setVisible(True)
+        effect = QGraphicsOpacityEffect(widget)
+        widget.setGraphicsEffect(effect)
+        animation = QPropertyAnimation(effect, b"opacity", widget)
+        animation.setDuration(180)
+        animation.setStartValue(0.0 if visible else 1.0)
+        animation.setEndValue(1.0 if visible else 0.0)
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        if not visible:
+            animation.finished.connect(lambda: widget.setVisible(False))
+        animation.finished.connect(lambda: widget.setGraphicsEffect(None))
+        animation.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+
+    def _send_voice_message(self) -> None:
+        if self._voice_input is None:
+            return
+        message = self._voice_input.text().strip()
+        if not message:
+            return
+        self._voice_input.clear()
+        provider = self._voice_provider.currentText() if self._voice_provider is not None else "Local Bridge"
+        response = f"IRIS: Routed to {provider}. Voice backend integration point is ready."
+        if self._voice_history is not None:
+            current = self._voice_history.toPlainText().strip()
+            next_text = "\n".join(part for part in (current, f"You: {message}", response) if part)
+            self._voice_history.setPlainText(next_text)
+            self._voice_history.verticalScrollBar().setValue(self._voice_history.verticalScrollBar().maximum())
+        if self._voice_core is not None:
+            self._voice_core.set_speech(response.replace("IRIS: ", ""))
+        if self._core is not None:
+            self._core.set_speech(response.replace("IRIS: ", ""))
+
+    def _toggle_voice_listening(self) -> None:
+        if self._voice_core is None:
+            return
+        next_state = "idle" if self._voice_core.state == "listening" else "listening"
+        self._voice_core.set_state(next_state)
+        if self._core is not None:
+            self._core.set_state(next_state)
+        if self._voice_mic_status is not None:
+            self._voice_mic_status.setText(f"Microphone: {next_state}")
 
     def _request_research_scan(self) -> None:
         self._view_model.request_research_scan()
@@ -816,9 +1039,9 @@ class MainWindow(QMainWindow):
             }
             QLabel#brand {
                 color: #f3fbff;
-                font-size: 16px;
+                font-size: 17px;
                 font-weight: 800;
-                padding: 10px;
+                padding: 13px;
                 border: 1px solid rgba(73, 204, 255, 95);
                 border-radius: 8px;
                 background-color: rgba(16, 45, 72, 165);
@@ -841,14 +1064,37 @@ class MainWindow(QMainWindow):
                 background-color: rgba(10, 34, 56, 180);
                 font-size: 12px;
             }
+            QLabel#activeTask {
+                color: #dff7ff;
+                padding: 8px 12px;
+                border-radius: 8px;
+                border: 1px solid rgba(93, 220, 255, 82);
+                background-color: rgba(7, 25, 43, 180);
+                font-size: 13px;
+                font-weight: 800;
+            }
+            QLabel#unreadBadge {
+                min-width: 26px;
+                min-height: 26px;
+                padding: 2px 6px;
+                border-radius: 8px;
+                background-color: rgba(30, 98, 138, 190);
+                border: 1px solid rgba(117, 228, 255, 135);
+                color: #ffffff;
+                font-weight: 900;
+            }
+            QLabel#unreadBadge[attention="true"] {
+                background-color: rgba(0, 170, 255, 210);
+            }
             QToolButton#navButton, QToolButton#collapseButton, QToolButton#roundTool {
-                min-height: 40px;
-                padding: 0 10px;
+                min-height: 46px;
+                padding: 0 13px;
                 border-radius: 8px;
                 border: 1px solid rgba(90, 215, 255, 58);
                 background-color: rgba(8, 24, 42, 120);
                 color: #ceefff;
                 font-weight: 700;
+                font-size: 13px;
             }
             QToolButton#navButton:hover, QToolButton#collapseButton:hover, QToolButton#roundTool:hover {
                 background-color: rgba(26, 116, 185, 150);
@@ -895,6 +1141,15 @@ class MainWindow(QMainWindow):
                 font-size: 12px;
                 padding: 12px;
             }
+            QTextEdit#timelinePanel {
+                background-color: rgba(3, 11, 20, 238);
+                border: 1px solid rgba(89, 212, 255, 105);
+                border-radius: 8px;
+                color: #e6f8ff;
+                font-family: Consolas, "Cascadia Mono", monospace;
+                font-size: 12px;
+                padding: 14px;
+            }
             QLineEdit {
                 min-height: 34px;
                 border-radius: 8px;
@@ -903,12 +1158,37 @@ class MainWindow(QMainWindow):
                 color: #e9f7ff;
                 padding: 0 12px;
             }
+            QComboBox {
+                min-height: 34px;
+                border-radius: 8px;
+                border: 1px solid rgba(89, 212, 255, 92);
+                background-color: rgba(3, 11, 20, 225);
+                color: #e9f7ff;
+                padding: 0 10px;
+            }
+            QCheckBox#voiceCheck {
+                color: #caedff;
+                font-weight: 700;
+                padding: 4px 0;
+            }
+            QSlider::groove:horizontal {
+                height: 6px;
+                border-radius: 3px;
+                background: rgba(91, 218, 255, 65);
+            }
+            QSlider::handle:horizontal {
+                width: 16px;
+                margin: -6px 0;
+                border-radius: 8px;
+                background: #65dcff;
+                border: 1px solid #d8fbff;
+            }
             QScrollArea#scrollPage {
                 border: 0;
                 background: transparent;
             }
             QFrame#notificationPanel {
-                background-color: rgba(3, 9, 17, 245);
+                background-color: rgba(3, 9, 17, 248);
                 border-left: 1px solid rgba(89, 212, 255, 95);
             }
             QMainWindow[focusMode="true"] QFrame#sidebar,
@@ -921,9 +1201,22 @@ class MainWindow(QMainWindow):
                 background-color: rgba(16, 5, 6, 220);
                 border-color: rgba(255, 74, 92, 115);
             }
+            QMainWindow[focusMode="true"] QLabel#activeTask,
+            QMainWindow[focusMode="true"] QTextEdit#textPanel,
+            QMainWindow[focusMode="true"] QTextEdit#timelinePanel,
+            QMainWindow[focusMode="true"] QLineEdit,
+            QMainWindow[focusMode="true"] QComboBox {
+                background-color: rgba(12, 3, 4, 230);
+                border-color: rgba(255, 74, 92, 130);
+                color: #ffe9e9;
+            }
             QMainWindow[focusMode="true"] QToolButton#navButton[active="true"],
             QMainWindow[focusMode="true"] QPushButton {
                 background-color: rgba(150, 0, 18, 160);
+                border-color: rgba(255, 95, 105, 190);
+            }
+            QMainWindow[focusMode="true"] QLabel#unreadBadge {
+                background-color: rgba(150, 0, 18, 190);
                 border-color: rgba(255, 95, 105, 190);
             }
             """
@@ -1003,6 +1296,7 @@ class LiveChart(QFrame):
         super().__init__()
         self.setObjectName("chart")
         self._values: deque[float] = deque([0.0] * 80, maxlen=80)
+        self._target = 0.0
         self._curve: Any | None = None
         self._fallback: QLabel | None = None
         layout = QVBoxLayout(self)
@@ -1017,7 +1311,10 @@ class LiveChart(QFrame):
             plot.setYRange(0, 100)
             plot.hideAxis("bottom")
             plot.hideAxis("left")
-            self._curve = plot.plot(pen=pg.mkPen("#51d7ff", width=2))
+            plot.setMouseEnabled(x=False, y=False)
+            plot.setMenuEnabled(False)
+            plot.setClipToView(True)
+            self._curve = plot.plot(pen=pg.mkPen("#51d7ff", width=2), antialias=True)
             layout.addWidget(plot)
         else:
             self._fallback = QLabel("--", self)
@@ -1027,7 +1324,8 @@ class LiveChart(QFrame):
         self.setMinimumHeight(185)
 
     def append(self, value: float) -> None:
-        bounded = max(0.0, min(100.0, value))
+        self._target = max(0.0, min(100.0, value))
+        bounded = self._values[-1] + (self._target - self._values[-1]) * 0.34
         self._values.append(bounded)
         if self._curve is not None:
             self._curve.setData(list(self._values))
@@ -1035,7 +1333,44 @@ class LiveChart(QFrame):
             self._fallback.setText(f"{bounded:.1f}%")
 
     def pulse(self) -> None:
+        if abs(self._target - self._values[-1]) > 0.3:
+            self.append(self._target)
         self.update()
+
+
+class VoiceWaveform(QWidget):
+    """Low-cost animated waveform for the future STT/TTS bridge."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._phase = 0.0
+        self._state = "idle"
+        self.setMinimumHeight(96)
+
+    def set_phase(self, phase: float, state: str) -> None:
+        self._phase = phase
+        self._state = state
+        self.update()
+
+    def paintEvent(self, _event: Any) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect().adjusted(14, 10, -14, -10)
+        color = QColor(255, 80, 94) if self._state == "error" else QColor(83, 219, 255)
+        if self._state == "speaking":
+            color = QColor(132, 242, 255)
+        elif self._state == "listening":
+            color = QColor(58, 232, 255)
+        painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 95), 1))
+        painter.drawRoundedRect(rect, 8, 8)
+        bars = 38
+        painter.setPen(QPen(color, 2.0))
+        center_y = rect.center().y()
+        for index in range(bars):
+            x = rect.left() + 14 + index * ((rect.width() - 28) / max(1, bars - 1))
+            active = 1.0 if self._state in {"listening", "speaking"} else 0.28
+            height = 10 + active * 34 * abs(math.sin(self._phase * 2.2 + index * 0.42))
+            painter.drawLine(int(x), int(center_y - height / 2), int(x), int(center_y + height / 2))
 
 
 class IrisCoreWidget(QWidget):
@@ -1054,23 +1389,43 @@ class IrisCoreWidget(QWidget):
         super().__init__(parent)
         self._phase = 0.0
         self._state = "idle"
+        self._previous_state = "idle"
+        self._transition_started = time.monotonic()
+        self._volume = 0.45
         self._speech = ""
+        self._speech_started = 0.0
+        self._speech_duration = 3.4
         self.setMinimumSize(430, 430)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
+    @property
+    def state(self) -> str:
+        """Return the target visual state."""
+        return self._state
+
     def set_phase(self, phase: float) -> None:
         self._phase = phase
+        if self._state == "listening":
+            self._volume = 0.35 + 0.45 * abs(math.sin(phase * 1.8))
         self.update()
 
     def set_state(self, state: str) -> None:
-        if state in self.COLORS:
+        if state in self.COLORS and state != self._state:
+            self._previous_state = self._state
             self._state = state
+            self._transition_started = time.monotonic()
             self.update()
+
+    def set_volume(self, volume: float) -> None:
+        self._volume = max(0.0, min(1.0, volume))
+        if self._state != "listening":
+            self.set_state("listening")
 
     def set_speech(self, text: str) -> None:
         self._speech = text
-        self._state = "speaking"
-        QTimer.singleShot(2800, self._clear_speech)
+        self._speech_started = time.monotonic()
+        self.set_state("speaking")
+        QTimer.singleShot(int(self._speech_duration * 1000), self._clear_speech)
 
     def _clear_speech(self) -> None:
         self._speech = ""
@@ -1084,7 +1439,7 @@ class IrisCoreWidget(QWidget):
         rect = self.rect()
         center = QPointF(rect.center())
         radius = min(rect.width(), rect.height()) * 0.27
-        color = self.COLORS[self._state]
+        color = self._current_color()
         breath = 1.0 + math.sin(self._phase * 1.5) * 0.045
 
         for index in range(5, 0, -1):
@@ -1093,7 +1448,8 @@ class IrisCoreWidget(QWidget):
             glow = QColor(color)
             glow.setAlpha(alpha)
             painter.setBrush(glow)
-            r = radius * breath + index * 18
+            state_boost = self._volume * 18 if self._state == "listening" else 0
+            r = radius * breath + index * 18 + state_boost
             painter.drawEllipse(center, r, r)
 
         painter.setBrush(QColor(4, 15, 27, 235))
@@ -1113,12 +1469,27 @@ class IrisCoreWidget(QWidget):
 
         if self._state == "listening":
             for index in range(3):
-                r = radius * (1.2 + ((self._phase * .55 + index * .3) % 1.0))
+                r = radius * (1.15 + self._volume * 0.35 + ((self._phase * .55 + index * .3) % 1.0))
                 ring = QColor(color)
                 ring.setAlpha(90 - index * 22)
                 painter.setPen(QPen(ring, 2))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawEllipse(center, r, r)
+
+        if self._state == "speaking":
+            for index in range(4):
+                r = radius * (1.0 + ((self._phase * .42 + index * .21) % 1.0))
+                ring = QColor(color)
+                ring.setAlpha(95 - index * 18)
+                painter.setPen(QPen(ring, 1.8))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawEllipse(center, r, r)
+
+        if self._state == "error":
+            pulse = abs(math.sin(self._phase * 3.0))
+            painter.setPen(QPen(QColor(255, 74, 91, int(160 * pulse)), 3))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(center, radius * (1.08 + pulse * 0.1), radius * (1.08 + pulse * 0.1))
 
         painter.setPen(QColor(255, 255, 255))
         font = QFont("Segoe UI", 28, QFont.Weight.Black)
@@ -1131,9 +1502,29 @@ class IrisCoreWidget(QWidget):
         if self._speech:
             self._draw_speech_cloud(painter, center, radius, color)
 
+    def _current_color(self) -> QColor:
+        elapsed = min(1.0, (time.monotonic() - self._transition_started) / 0.38)
+        ease = 1.0 - (1.0 - elapsed) ** 3
+        start = self.COLORS[self._previous_state]
+        end = self.COLORS[self._state]
+        return QColor(
+            int(start.red() + (end.red() - start.red()) * ease),
+            int(start.green() + (end.green() - start.green()) * ease),
+            int(start.blue() + (end.blue() - start.blue()) * ease),
+        )
+
     def _draw_speech_cloud(self, painter: QPainter, center: QPointF, radius: float, color: QColor) -> None:
+        elapsed = time.monotonic() - self._speech_started
+        if elapsed <= 0.28:
+            opacity = elapsed / 0.28
+        elif elapsed >= self._speech_duration - 0.55:
+            opacity = max(0.0, (self._speech_duration - elapsed) / 0.55)
+        else:
+            opacity = 1.0
         width = min(self.width() * 0.58, 360)
-        cloud = QRectF(center.x() - width / 2, center.y() - radius - 108, width, 86)
+        scale = 0.82 + 0.18 * opacity
+        cloud = QRectF(center.x() - (width * scale) / 2, center.y() - radius - 108, width * scale, 86 * scale)
+        painter.setOpacity(opacity)
         painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 180), 1.5))
         painter.setBrush(QColor(6, 22, 36, 225))
         painter.drawRoundedRect(cloud, 8, 8)
@@ -1146,6 +1537,7 @@ class IrisCoreWidget(QWidget):
             x = cloud.left() + 18 + index * ((cloud.width() - 36) / 26)
             height = 7 + 14 * abs(math.sin(self._phase * 2 + index * .55))
             painter.drawLine(int(x), int(base_y - height / 2), int(x), int(base_y + height / 2))
+        painter.setOpacity(1.0)
 
 
 class WorkflowGraph(QWidget):

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from iris.ai_router.router import AIRouter
 from iris.agents.manager import AgentManager
 from iris.core.iris_core import IrisCore
 from iris.services.logger import LogBuffer
@@ -27,6 +28,7 @@ class DashboardState:
     logs: list[str]
     youtube_agent: dict[str, Any]
     research_agent: dict[str, Any]
+    ai_router: dict[str, Any]
     workflows: dict[str, Any]
     scheduler: dict[str, Any]
 
@@ -58,6 +60,7 @@ class DashboardViewModel:
             logs=self._log_buffer.lines(),
             youtube_agent=self._youtube_agent_snapshot(),
             research_agent=self._research_agent_snapshot(),
+            ai_router=self._ai_router_snapshot(),
             workflows=self._workflow_snapshot(),
             scheduler=self._scheduler_snapshot(),
         )
@@ -160,6 +163,19 @@ class DashboardViewModel:
                 "metrics": {},
             }
         return engine.dashboard_snapshot()
+
+    def _ai_router_snapshot(self) -> dict[str, Any]:
+        try:
+            router = self._core.service_registry.get("ai_router", AIRouter)
+        except KeyError:
+            return {
+                "registered_providers": [],
+                "provider_status": [],
+                "routing_mode": "unavailable",
+                "current_provider": None,
+                "configuration": {},
+            }
+        return router.dashboard_snapshot()
 
     def _scheduler_snapshot(self) -> dict[str, Any]:
         try:
