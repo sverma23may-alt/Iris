@@ -6,6 +6,7 @@ from collections.abc import Iterable
 
 from iris.ai_router.exceptions import ProviderNotFoundError
 from iris.ai_router.provider import AIProvider
+from iris.ai_router.providers.gemini import GeminiProvider
 from iris.ai_router.providers.mock import MockProvider
 
 
@@ -50,6 +51,7 @@ class ProviderRegistry:
     def auto_discover(self) -> None:
         """Register built-in providers and provider classes that self-registered."""
         register_provider_type(MockProvider)
+        register_provider_type(GeminiProvider)
         for provider_type in _REGISTERED_PROVIDER_TYPES.values():
             if provider_type.name not in self._providers:
                 self.register(provider_type())
