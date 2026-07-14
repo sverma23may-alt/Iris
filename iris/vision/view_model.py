@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
+from iris.ai_router.exceptions import ProviderExecutionError, ProviderUnavailableError
 from iris.ai_router.router import AIRouter
 from iris.agents.manager import AgentManager
 from iris.core.iris_core import IrisCore
@@ -33,6 +35,26 @@ class DashboardState:
     scheduler: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class ChatMessage:
+    """A single turn in the IRIS Chat conversation."""
+
+    role: str
+    text: str
+    timestamp: str
+    provider: str | None = None
+    latency_ms: float | None = None
+
+
+@dataclass(frozen=True)
+class ChatResult:
+    """Outcome of requesting an assistant reply from the AI Router."""
+
+    message: ChatMessage
+    used_fallback: bool
+    notice: str | None = None
+
+
 class DashboardViewModel:
     """Adapter between IRIS Vision widgets and infrastructure services."""
 
@@ -45,6 +67,7 @@ class DashboardViewModel:
         self._core = core
         self._metrics_service = metrics_service
         self._log_buffer = log_buffer
+        self._chat_history: list[ChatMessage] = []
 
     def snapshot(self) -> DashboardState:
         """Return the latest dashboard state."""
@@ -112,6 +135,83 @@ class DashboardViewModel:
         if engine is not None:
             engine.cancel(execution_id)
 
+    def chat_history(self) -> list[ChatMessage]:
+        """Return the IRIS Chat conversation so far."""
+        return list(self._chat_history)
+
+    def append_user_message(self, text: str) -> ChatMessage:
+        """Record a user chat message. Safe to call from the UI thread."""
+        message = ChatMessage(role="user", text=text, timestamp=_now_display_time())
+        self._chat_history.append(message)
+        return message
+
+    def request_assistant_reply(self) -> ChatResult:
+        """Send the conversation to AIRouter and append the assistant's reply.
+
+        Prefers Gemini; automatically falls back to MockProvider when Gemini is
+        unavailable or a request fails, per the existing AIRouter fallback
+        behavior. Never raises - always returns a ChatResult so the UI thread
+        never crashes, even if no provider could be reached at all. Safe to
+        call from a background thread; only reads/appends to the in-memory
+        chat history list.
+        """
+        router = self._ai_router()
+        if router is None:
+            message = ChatMessage(
+                role="assistant",
+                text="IRIS could not reach the AI Router.",
+                timestamp=_now_display_time(),
+            )
+            self._chat_history.append(message)
+            return ChatResult(message=message, used_fallback=False, notice="AI Router is unavailable.")
+
+        payload = [
+            {"role": entry.role, "content": entry.text}
+            for entry in self._chat_history
+            if entry.role in ("user", "assistant")
+        ]
+
+        used_fallback = False
+        try:
+            response = router.chat(payload, provider_name="gemini")
+        except (ProviderUnavailableError, ProviderExecutionError):
+            # select_provider() raises before AIRouter's own internal fallback
+            # logic ever runs (that only kicks in once a provider has been
+            # selected and its request fails), so an outright-unavailable
+            # Gemini needs an explicit retry against Mock here.
+            used_fallback = True
+            try:
+                response = router.chat(payload, provider_name="mock")
+            except (ProviderUnavailableError, ProviderExecutionError) as exc:
+                message = ChatMessage(
+                    role="assistant",
+                    text="IRIS could not reach any AI provider right now. Please try again shortly.",
+                    timestamp=_now_display_time(),
+                )
+                self._chat_history.append(message)
+                return ChatResult(message=message, used_fallback=True, notice=str(exc))
+        else:
+            # AIRouter._fallback_or_error() already retries against the
+            # configured fallback_provider internally when Gemini's request
+            # itself fails, returning a successful response without raising.
+            # Detect that silent substitution from the response instead.
+            used_fallback = response.provider != "gemini"
+
+        message = ChatMessage(
+            role="assistant",
+            text=str(response.response),
+            timestamp=_now_display_time(),
+            provider=response.provider,
+            latency_ms=response.latency_ms,
+        )
+        self._chat_history.append(message)
+        notice = "Gemini unavailable. Using Mock Provider." if used_fallback else None
+        return ChatResult(message=message, used_fallback=used_fallback, notice=notice)
+
+    def clear_chat(self) -> None:
+        """Clear the IRIS Chat conversation history."""
+        self._chat_history.clear()
+
     def _youtube_agent_snapshot(self) -> dict[str, Any]:
         agent = self._agent("YouTube Agent")
         if agent is None or not hasattr(agent, "dashboard_snapshot"):
@@ -165,9 +265,8 @@ class DashboardViewModel:
         return engine.dashboard_snapshot()
 
     def _ai_router_snapshot(self) -> dict[str, Any]:
-        try:
-            router = self._core.service_registry.get("ai_router", AIRouter)
-        except KeyError:
+        router = self._ai_router()
+        if router is None:
             return {
                 "registered_providers": [],
                 "provider_status": [],
@@ -176,6 +275,12 @@ class DashboardViewModel:
                 "configuration": {},
             }
         return router.dashboard_snapshot()
+
+    def _ai_router(self) -> AIRouter | None:
+        try:
+            return self._core.service_registry.get("ai_router", AIRouter)
+        except KeyError:
+            return None
 
     def _scheduler_snapshot(self) -> dict[str, Any]:
         try:
@@ -193,3 +298,8 @@ class DashboardViewModel:
     def _agent(self, name: str) -> Any | None:
         agent_manager = self._core.service_registry.get("agent_manager", AgentManager)
         return agent_manager.get_agent(name)
+
+
+def _now_display_time() -> str:
+    """Return a short local time string for chat message badges."""
+    return datetime.now().strftime("%H:%M:%S")
