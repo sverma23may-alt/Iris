@@ -1,5 +1,17 @@
 # IRIS Release Notes
 
+## 0.6.0 - Sprint 8.3 Voice Page
+
+- Completed the Voice Page, replacing the previous stub that faked replies locally.
+- Voice Page now routes through the existing `DashboardViewModel` and `AIRouter`; it never touches a provider directly.
+- Voice Page shares the exact conversation history used by the Chat Page (`DashboardViewModel.chat_history()`).
+- Reused the existing chat logic (`append_user_message`, `request_assistant_reply`, `clear_chat`) with no duplication.
+- Introduced a single shared `ChatReplyWorker` (Qt `QThread`) used for off-UI-thread replies so both the Chat and Voice pages stay responsive; no dedicated voice-only worker was added.
+- Voice states: Idle, Listening, Thinking, Speaking, driven by `IrisCoreWidget` and `VoiceWaveform`.
+- Displays provider badge and message timestamp; supports Clear Conversation and Copy Last Response.
+- Automatic provider fallback (e.g. Gemini unavailable -> MockProvider) is handled by `AIRouter` via the shared `request_assistant_reply` path.
+- Preserved all existing Chat functionality and the existing test suite.
+
 ## 0.5.5 - IRIS Dashboard 2.0
 
 - Redesigned the PySide6 dashboard as a dark glassmorphism AI Operating System.

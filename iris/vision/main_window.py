@@ -17,8 +17,8 @@ except ImportError:  # pragma: no cover
 from PySide6.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, QSize, QTimer, Qt
 from PySide6.QtGui import QAction, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
-    QComboBox,
     QFrame,
     QGraphicsBlurEffect,
     QGraphicsDropShadowEffect,
@@ -40,7 +40,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from iris.vision.view_model import DashboardState, DashboardViewModel
+from iris.vision.chat_worker import ChatReplyWorker
+from iris.vision.view_model import ChatResult, DashboardState, DashboardViewModel
 
 
 class MainWindow(QMainWindow):
@@ -85,8 +86,10 @@ class MainWindow(QMainWindow):
         self._voice_waveform: "VoiceWaveform | None" = None
         self._voice_input: QLineEdit | None = None
         self._voice_history: QTextEdit | None = None
-        self._voice_provider: QComboBox | None = None
+        self._voice_badge: QLabel | None = None
         self._voice_mic_status: QLabel | None = None
+        self._voice_worker: "ChatReplyWorker | None" = None
+        self._voice_last_result: "ChatResult | None" = None
         self._active_task: QLabel | None = None
         self._stack: QStackedWidget | None = None
         self._last_state: DashboardState | None = None
@@ -421,7 +424,7 @@ class MainWindow(QMainWindow):
         center_layout = QVBoxLayout(center)
         center_layout.setContentsMargins(12, 12, 12, 12)
         self._voice_core = IrisCoreWidget(center)
-        self._voice_core.set_state("listening")
+        self._voice_core.set_state("idle")
         self._voice_waveform = VoiceWaveform(center)
         center_layout.addWidget(self._voice_core, stretch=3)
         center_layout.addWidget(self._voice_waveform)
@@ -437,8 +440,8 @@ class MainWindow(QMainWindow):
         self._voice_mic_status.setObjectName("cardLabel")
         provider_label = QLabel("Current provider", right)
         provider_label.setObjectName("cardLabel")
-        self._voice_provider = QComboBox(right)
-        self._voice_provider.addItems(("Local Bridge", "OpenAI Realtime", "System TTS", "Future Provider"))
+        self._voice_badge = QLabel("Provider: --", right)
+        self._voice_badge.setObjectName("cardLabel")
         vad = QCheckBox("Voice activity detection", right)
         vad.setChecked(True)
         vad.setObjectName("voiceCheck")
@@ -447,14 +450,22 @@ class MainWindow(QMainWindow):
         sensitivity = QSlider(Qt.Orientation.Horizontal, right)
         sensitivity.setRange(0, 100)
         sensitivity.setValue(62)
+        actions = QHBoxLayout()
+        clear_btn = QPushButton("Clear Conversation", right)
+        clear_btn.clicked.connect(self._clear_voice_conversation)
+        copy_btn = QPushButton("Copy Last Response", right)
+        copy_btn.clicked.connect(self._copy_last_response)
+        actions.addWidget(clear_btn)
+        actions.addWidget(copy_btn)
         self._panels["voice_console"] = self._text_panel("Conversation Log")
         right_layout.addWidget(settings)
         right_layout.addWidget(self._voice_mic_status)
         right_layout.addWidget(provider_label)
-        right_layout.addWidget(self._voice_provider)
+        right_layout.addWidget(self._voice_badge)
         right_layout.addWidget(vad)
         right_layout.addWidget(sensitivity_label)
         right_layout.addWidget(sensitivity)
+        right_layout.addLayout(actions)
         right_layout.addWidget(self._panels["voice_console"], stretch=1)
 
         layout.addWidget(left, 0, 0)
@@ -755,7 +766,7 @@ class MainWindow(QMainWindow):
             cards.append(self._html_card(name, f"{health} | {status} | v{service.get('version', '--')}"))
         self._set_panel_html("settings", self._html_doc("System Services", "".join(cards)))
         self._set_panel("telegram", state.logs[-80:] or ["No Telegram events in the current log stream."])
-        provider = self._voice_provider.currentText() if self._voice_provider is not None else "Local Bridge"
+        provider = state.ai_router.get("current_provider") or "Local Bridge"
         self._set_panel(
             "voice_console",
             [
@@ -949,23 +960,87 @@ class MainWindow(QMainWindow):
         animation.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
     def _send_voice_message(self) -> None:
-        if self._voice_input is None:
+        if self._voice_input is None or self._view_model is None:
             return
         message = self._voice_input.text().strip()
         if not message:
             return
         self._voice_input.clear()
-        provider = self._voice_provider.currentText() if self._voice_provider is not None else "Local Bridge"
-        response = f"IRIS: Routed to {provider}. Voice backend integration point is ready."
-        if self._voice_history is not None:
-            current = self._voice_history.toPlainText().strip()
-            next_text = "\n".join(part for part in (current, f"You: {message}", response) if part)
-            self._voice_history.setPlainText(next_text)
-            self._voice_history.verticalScrollBar().setValue(self._voice_history.verticalScrollBar().maximum())
+        self._view_model.append_user_message(message)
+        self._render_voice_history()
         if self._voice_core is not None:
-            self._voice_core.set_speech(response.replace("IRIS: ", ""))
+            self._voice_core.set_state("thinking")
+        if self._voice_mic_status is not None:
+            self._voice_mic_status.setText("Microphone: thinking")
+        if self._voice_worker is not None and self._voice_worker.isRunning():
+            return
+        worker = ChatReplyWorker(self._view_model, self)
+        worker.reply_ready.connect(self._on_voice_reply_ready)
+        worker.reply_error.connect(self._on_voice_reply_error)
+        worker.finished.connect(worker.deleteLater)
+        self._voice_worker = worker
+        worker.start()
+
+    def _on_voice_reply_ready(self, result: ChatResult) -> None:
+        self._voice_last_result = result
+        self._render_voice_history()
+        if self._voice_core is not None:
+            self._voice_core.set_speech(result.message.text)
         if self._core is not None:
-            self._core.set_speech(response.replace("IRIS: ", ""))
+            self._core.set_speech(result.message.text)
+        if self._voice_mic_status is not None:
+            self._voice_mic_status.setText("Microphone: speaking")
+        if self._voice_badge is not None:
+            badge = result.message.provider or "unknown"
+            if result.used_fallback:
+                badge += " (fallback)"
+            self._voice_badge.setText(f"Provider: {badge}")
+
+    def _on_voice_reply_error(self, message: str) -> None:
+        if self._voice_core is not None:
+            self._voice_core.set_state("idle")
+        if self._voice_mic_status is not None:
+            self._voice_mic_status.setText("Microphone: standby")
+        self._render_voice_history()
+
+    def _render_voice_history(self) -> None:
+        if self._voice_history is None or self._view_model is None:
+            return
+        lines = []
+        for entry in self._view_model.chat_history():
+            prefix = "You" if entry.role == "user" else "IRIS"
+            stamp = entry.timestamp or ""
+            provider = f" [{entry.provider}]" if entry.provider else ""
+            lines.append(f"{stamp} {prefix}{provider}: {entry.text}")
+        self._voice_history.setPlainText("\n".join(lines))
+        self._voice_history.verticalScrollBar().setValue(self._voice_history.verticalScrollBar().maximum())
+
+    def _clear_voice_conversation(self) -> None:
+        if self._view_model is not None:
+            self._view_model.clear_chat()
+        if self._voice_history is not None:
+            self._voice_history.clear()
+        if self._voice_core is not None:
+            self._voice_core.set_state("idle")
+        if self._voice_mic_status is not None:
+            self._voice_mic_status.setText("Microphone: standby")
+        if self._voice_badge is not None:
+            self._voice_badge.setText("Provider: --")
+        self._voice_last_result = None
+
+    def _copy_last_response(self) -> None:
+        if self._view_model is None:
+            return
+        last = None
+        for entry in reversed(self._view_model.chat_history()):
+            if entry.role == "assistant":
+                last = entry
+                break
+        if last is None:
+            return
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(last.text)
 
     def _toggle_voice_listening(self) -> None:
         if self._voice_core is None:
