@@ -14,9 +14,10 @@ try:  # pragma: no cover - optional UI dependency
 except ImportError:  # pragma: no cover
     pg = None
 
-from PySide6.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, QSize, QTimer, Qt
+from PySide6.QtCore import QEasingCurve, QObject, QPointF, QPropertyAnimation, QRectF, QSize, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QFrame,
@@ -40,7 +41,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from iris.vision.view_model import DashboardState, DashboardViewModel
+from iris.vision.view_model import ChatMessage, ChatResult, DashboardState, DashboardViewModel
 
 
 class MainWindow(QMainWindow):
@@ -48,6 +49,7 @@ class MainWindow(QMainWindow):
 
     PAGES = (
         ("mission", "Mission Control", QStyle.StandardPixmap.SP_ComputerIcon),
+        ("chat", "IRIS Chat", QStyle.StandardPixmap.SP_MessageBoxQuestion),
         ("research", "Research", QStyle.StandardPixmap.SP_FileDialogContentsView),
         ("studio", "Studio", QStyle.StandardPixmap.SP_MediaPlay),
         ("router", "AI Router", QStyle.StandardPixmap.SP_DriveNetIcon),
@@ -87,6 +89,12 @@ class MainWindow(QMainWindow):
         self._voice_history: QTextEdit | None = None
         self._voice_provider: QComboBox | None = None
         self._voice_mic_status: QLabel | None = None
+        self._chat_core: IrisCoreWidget | None = None
+        self._chat_history_panel: QTextEdit | None = None
+        self._chat_input: QTextEdit | None = None
+        self._chat_send_button: QPushButton | None = None
+        self._chat_notice: QLabel | None = None
+        self._chat_worker: "_ChatWorker | None" = None
         self._active_task: QLabel | None = None
         self._stack: QStackedWidget | None = None
         self._last_state: DashboardState | None = None
@@ -218,6 +226,8 @@ class MainWindow(QMainWindow):
     def _build_page(self, key: str) -> QWidget:
         if key == "mission":
             return self._build_mission_page()
+        if key == "chat":
+            return self._build_chat_page()
         if key == "workflow":
             return self._build_workflow_page()
         if key == "router":
@@ -464,6 +474,159 @@ class MainWindow(QMainWindow):
         layout.setColumnStretch(1, 3)
         layout.setColumnStretch(2, 2)
         return page
+
+    def _build_chat_page(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("visionPage")
+        layout = QGridLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(14)
+
+        left = QFrame(page)
+        left.setObjectName("glass")
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(14, 14, 14, 14)
+        left_layout.setSpacing(10)
+
+        header = QHBoxLayout()
+        title = QLabel("IRIS Chat", left)
+        title.setObjectName("sectionTitle")
+        copy_button = QPushButton("Copy Response", left)
+        copy_button.clicked.connect(self._copy_last_chat_response)
+        clear_button = QPushButton("Clear", left)
+        clear_button.clicked.connect(self._clear_chat)
+        header.addWidget(title, stretch=1)
+        header.addWidget(copy_button)
+        header.addWidget(clear_button)
+
+        self._chat_history_panel = self._text_panel("IRIS Chat")
+        self._chat_history_panel.setObjectName("timelinePanel")
+        self._chat_history_panel.setMinimumHeight(360)
+
+        self._chat_notice = QLabel("", left)
+        self._chat_notice.setObjectName("cardLabel")
+        self._chat_notice.setVisible(False)
+
+        self._chat_input = QTextEdit(left)
+        self._chat_input.setObjectName("textPanel")
+        self._chat_input.setPlaceholderText("Message IRIS...")
+        self._chat_input.setFixedHeight(84)
+
+        input_row = QHBoxLayout()
+        self._chat_send_button = QPushButton("Send", left)
+        self._chat_send_button.clicked.connect(self._send_chat_message)
+        input_row.addWidget(self._chat_input, stretch=1)
+        input_row.addWidget(self._chat_send_button)
+
+        left_layout.addLayout(header)
+        left_layout.addWidget(self._chat_history_panel, stretch=1)
+        left_layout.addWidget(self._chat_notice)
+        left_layout.addLayout(input_row)
+
+        right = QFrame(page)
+        right.setObjectName("glass")
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(12, 12, 12, 12)
+        self._chat_core = IrisCoreWidget(right)
+        self._chat_core.set_state("idle")
+        right_layout.addWidget(self._chat_core, stretch=1)
+
+        layout.addWidget(left, 0, 0)
+        layout.addWidget(right, 0, 1)
+        layout.setColumnStretch(0, 3)
+        layout.setColumnStretch(1, 2)
+
+        self._render_chat_history()
+        return page
+
+    def _render_chat_history(self) -> None:
+        if self._chat_history_panel is None:
+            return
+        messages = self._view_model.chat_history()
+        if not messages:
+            body = "<div style=\"color:#7fb8d9;\">Say hello to IRIS to begin.</div>"
+        else:
+            body = "".join(self._chat_message_html(message) for message in messages)
+        self._chat_history_panel.setAcceptRichText(True)
+        self._chat_history_panel.setHtml(self._html_doc("IRIS Chat", body))
+        scrollbar = self._chat_history_panel.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _chat_message_html(self, message: ChatMessage) -> str:
+        is_user = message.role == "user"
+        align = "right" if is_user else "left"
+        bubble_color = "rgba(42,190,255,.16)" if is_user else "rgba(178,98,255,.14)"
+        border_color = "rgba(42,190,255,.45)" if is_user else "rgba(178,98,255,.45)"
+        speaker = "You" if is_user else "IRIS"
+        badges = f"<span style=\"color:#7fb8d9;\">{escape(message.timestamp)}</span>"
+        if message.provider:
+            badges += f" &middot; <span style=\"color:#8be9ff;\">{escape(message.provider)}</span>"
+        if message.latency_ms is not None:
+            badges += f" &middot; <span style=\"color:#8be9ff;\">{message.latency_ms:.0f} ms</span>"
+        return (
+            f"<div style=\"text-align:{align};margin:0 0 12px 0;\">"
+            f"<div style=\"display:inline-block;max-width:78%;text-align:left;"
+            f"background:{bubble_color};border:1px solid {border_color};border-radius:10px;"
+            f"padding:10px 14px;\">"
+            f"<div style=\"font-size:12px;font-weight:700;color:#ffffff;margin-bottom:4px;\">{escape(speaker)}</div>"
+            f"<div style=\"font-size:13px;color:#e8f5ff;white-space:pre-wrap;\">{escape(message.text)}</div>"
+            f"<div style=\"font-size:11px;margin-top:6px;\">{badges}</div>"
+            f"</div></div>"
+        )
+
+    def _send_chat_message(self) -> None:
+        if self._chat_input is None or self._chat_worker is not None:
+            return
+        text = self._chat_input.toPlainText().strip()
+        if not text:
+            return
+        self._chat_input.clear()
+        self._view_model.append_user_message(text)
+        self._render_chat_history()
+        if self._chat_notice is not None:
+            self._chat_notice.setVisible(False)
+        if self._chat_core is not None:
+            self._chat_core.set_state("thinking")
+        if self._chat_send_button is not None:
+            self._chat_send_button.setEnabled(False)
+
+        worker = _ChatWorker(self._view_model, self)
+        worker.completed.connect(self._on_chat_response)
+        worker.finished.connect(self._on_chat_worker_finished)
+        self._chat_worker = worker
+        worker.start()
+
+    def _on_chat_response(self, result: ChatResult) -> None:
+        self._render_chat_history()
+        if self._chat_core is not None:
+            self._chat_core.set_speech(result.message.text)
+        if self._chat_notice is not None:
+            if result.notice:
+                self._chat_notice.setText(result.notice)
+                self._chat_notice.setVisible(True)
+            else:
+                self._chat_notice.setVisible(False)
+
+    def _on_chat_worker_finished(self) -> None:
+        self._chat_worker = None
+        if self._chat_send_button is not None:
+            self._chat_send_button.setEnabled(True)
+
+    def _clear_chat(self) -> None:
+        self._view_model.clear_chat()
+        self._render_chat_history()
+        if self._chat_notice is not None:
+            self._chat_notice.setVisible(False)
+        if self._chat_core is not None:
+            self._chat_core.set_state("idle")
+
+    def _copy_last_chat_response(self) -> None:
+        for message in reversed(self._view_model.chat_history()):
+            if message.role == "assistant":
+                clipboard = QApplication.clipboard()
+                if clipboard is not None:
+                    clipboard.setText(message.text)
+                break
 
     def _build_settings_page(self) -> QWidget:
         return self._build_console_page("settings", "System Services")
@@ -905,6 +1068,10 @@ class MainWindow(QMainWindow):
 
     def _toggle_focus_mode(self) -> None:
         self._focus_mode = not self._focus_mode
+        if self._core is not None:
+            self._core.set_focus(self._focus_mode)
+        if self._voice_core is not None:
+            self._voice_core.set_focus(self._focus_mode)
         if self._focus_mode and self._notifications_open:
             self._notifications_open = False
             if self._notification_panel is not None:
@@ -945,14 +1112,16 @@ class MainWindow(QMainWindow):
         animation.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
     def _send_voice_message(self) -> None:
+        """Voice input hook. Speech recognition/synthesis ship in Sprint 9;
+        for now this only demonstrates the integration point (mic text -> IRIS)
+        without claiming to route anywhere real."""
         if self._voice_input is None:
             return
         message = self._voice_input.text().strip()
         if not message:
             return
         self._voice_input.clear()
-        provider = self._voice_provider.currentText() if self._voice_provider is not None else "Local Bridge"
-        response = f"IRIS: Routed to {provider}. Voice backend integration point is ready."
+        response = "IRIS: This feature will be available in Sprint 9."
         if self._voice_history is not None:
             current = self._voice_history.toPlainText().strip()
             next_text = "\n".join(part for part in (current, f"You: {message}", response) if part)
@@ -960,8 +1129,6 @@ class MainWindow(QMainWindow):
             self._voice_history.verticalScrollBar().setValue(self._voice_history.verticalScrollBar().maximum())
         if self._voice_core is not None:
             self._voice_core.set_speech(response.replace("IRIS: ", ""))
-        if self._core is not None:
-            self._core.set_speech(response.replace("IRIS: ", ""))
 
     def _toggle_voice_listening(self) -> None:
         if self._voice_core is None:
@@ -1223,6 +1390,27 @@ class MainWindow(QMainWindow):
         )
 
 
+class _ChatWorker(QThread):
+    """Runs a chat request off the UI thread.
+
+    AIRouter.chat() can block on a real network call to Gemini, and the UI
+    thread must stay free so the IrisCore "thinking" animation keeps
+    repainting while a reply is in flight. This worker only ever calls into
+    DashboardViewModel.request_assistant_reply(), preserving the
+    MainWindow -> DashboardViewModel -> AIRouter -> Provider call path.
+    """
+
+    completed = Signal(object)
+
+    def __init__(self, view_model: DashboardViewModel, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._view_model = view_model
+
+    def run(self) -> None:
+        result = self._view_model.request_assistant_reply()
+        self.completed.emit(result)
+
+
 class MetricTile(QFrame):
     """Compact live metric tile."""
 
@@ -1395,6 +1583,7 @@ class IrisCoreWidget(QWidget):
         self._speech = ""
         self._speech_started = 0.0
         self._speech_duration = 3.4
+        self._focus = False
         self.setMinimumSize(430, 430)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
@@ -1420,6 +1609,11 @@ class IrisCoreWidget(QWidget):
         self._volume = max(0.0, min(1.0, volume))
         if self._state != "listening":
             self.set_state("listening")
+
+    def set_focus(self, focus: bool) -> None:
+        if focus != self._focus:
+            self._focus = focus
+            self.update()
 
     def set_speech(self, text: str) -> None:
         self._speech = text
@@ -1502,15 +1696,25 @@ class IrisCoreWidget(QWidget):
         if self._speech:
             self._draw_speech_cloud(painter, center, radius, color)
 
+    FOCUS_COLOR = QColor(220, 38, 55)
+
     def _current_color(self) -> QColor:
         elapsed = min(1.0, (time.monotonic() - self._transition_started) / 0.38)
         ease = 1.0 - (1.0 - elapsed) ** 3
         start = self.COLORS[self._previous_state]
         end = self.COLORS[self._state]
-        return QColor(
+        color = QColor(
             int(start.red() + (end.red() - start.red()) * ease),
             int(start.green() + (end.green() - start.green()) * ease),
             int(start.blue() + (end.blue() - start.blue()) * ease),
+        )
+        if not self._focus:
+            return color
+        focus_color = self.FOCUS_COLOR
+        return QColor(
+            int(color.red() * 0.35 + focus_color.red() * 0.65),
+            int(color.green() * 0.35 + focus_color.green() * 0.65),
+            int(color.blue() * 0.35 + focus_color.blue() * 0.65),
         )
 
     def _draw_speech_cloud(self, painter: QPainter, center: QPointF, radius: float, color: QColor) -> None:
